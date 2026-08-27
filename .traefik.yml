@@ -1,0 +1,12 @@
+displayName: Simple Cache
+type: middleware
+import: github.com/ysturasp/traefik-plugin-cache
+compatibility: ">=3.0.0"
+summary: "Simple in-memory HTTP response cache"
+description: "Caches GET responses in memory with configurable TTL and max entries. Adds X-Cache-Status header."
+github: "https://github.com/ysturasp/traefik-plugin-cache"
+testData:
+  maxEntries: 1024
+  ttlSeconds: 1800
+  addHeader: true
+  debug: false
