@@ -17,7 +17,7 @@ type Config struct {
 	Debug      bool   `json:"debug,omitempty" yaml:"debug,omitempty"`
 }
 
-func ConfigDefaults() *Config {
+func CreateConfig() *Config {
 	return &Config{
 		MaxEntries: 1024,
 		TTLSeconds: 1800,
@@ -135,7 +135,7 @@ type Cache struct {
 
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
 	if config == nil {
-		config = ConfigDefaults()
+		config = CreateConfig()
 	}
 	return &Cache{
 		next:  next,
