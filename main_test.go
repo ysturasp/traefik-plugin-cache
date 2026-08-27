@@ -14,7 +14,7 @@ func newTestMiddleware(next http.Handler, cfg *Config) http.Handler {
 }
 
 func TestCacheMiss(t *testing.T) {
-	cfg := ConfigDefaults()
+	cfg := CreateConfig()
 	handler := newTestHandler(http.StatusOK, "hello")
 	middleware := newTestMiddleware(handler, cfg)
 
@@ -31,7 +31,7 @@ func TestCacheMiss(t *testing.T) {
 }
 
 func TestCacheHit(t *testing.T) {
-	cfg := ConfigDefaults()
+	cfg := CreateConfig()
 	handler := newTestHandler(http.StatusOK, "hello")
 	middleware := newTestMiddleware(handler, cfg)
 
@@ -52,7 +52,7 @@ func TestCacheHit(t *testing.T) {
 }
 
 func TestCacheMissDifferentPath(t *testing.T) {
-	cfg := ConfigDefaults()
+	cfg := CreateConfig()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(r.URL.Path))
 	})
@@ -72,7 +72,7 @@ func TestCacheMissDifferentPath(t *testing.T) {
 }
 
 func TestCacheBypassMethod(t *testing.T) {
-	cfg := ConfigDefaults()
+	cfg := CreateConfig()
 	handler := newTestHandler(http.StatusOK, "hello")
 	middleware := newTestMiddleware(handler, cfg)
 
@@ -86,7 +86,7 @@ func TestCacheBypassMethod(t *testing.T) {
 }
 
 func TestCacheExcludesErrors(t *testing.T) {
-	cfg := ConfigDefaults()
+	cfg := CreateConfig()
 	handler := newTestHandler(http.StatusInternalServerError, "error")
 	middleware := newTestMiddleware(handler, cfg)
 
@@ -161,7 +161,7 @@ func TestCacheStatusHeaderDisabled(t *testing.T) {
 }
 
 func TestCacheHeadersPreserved(t *testing.T) {
-	cfg := ConfigDefaults()
+	cfg := CreateConfig()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Custom", "value")
 		w.Header().Set("Content-Type", "text/plain")
@@ -189,8 +189,27 @@ func TestCacheHeadersPreserved(t *testing.T) {
 	}
 }
 
+func TestCacheMissHeadersNotDuplicated(t *testing.T) {
+	cfg := CreateConfig()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "https://ysturasp.ru")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("hello"))
+	})
+	middleware := newTestMiddleware(handler, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec := httptest.NewRecorder()
+	middleware.ServeHTTP(rec, req)
+
+	values := rec.Header().Values("Access-Control-Allow-Origin")
+	if len(values) != 1 {
+		t.Errorf("expected exactly one Access-Control-Allow-Origin value on a cache miss, got %v", values)
+	}
+}
+
 func TestCacheStatusCodes(t *testing.T) {
-	cfg := ConfigDefaults()
+	cfg := CreateConfig()
 
 	codes := []int{200, 201, 204, 301, 304}
 	for _, code := range codes {

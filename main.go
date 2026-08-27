@@ -104,6 +104,7 @@ type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
 	body       *bytes.Buffer
+	header     http.Header
 	wroteHeader bool
 }
 
@@ -112,7 +113,12 @@ func newResponseWriter(w http.ResponseWriter) *responseWriter {
 		ResponseWriter: w,
 		statusCode:     http.StatusOK,
 		body:           &bytes.Buffer{},
+		header:         make(http.Header),
 	}
+}
+
+func (rw *responseWriter) Header() http.Header {
+	return rw.header
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
