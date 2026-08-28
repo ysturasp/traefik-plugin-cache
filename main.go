@@ -180,7 +180,7 @@ func (c *Cache) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	capture := newResponseWriter(rw)
 	c.next.ServeHTTP(capture, req)
 
-	if capture.statusCode >= 200 && capture.statusCode < 400 {
+	if capture.statusCode >= 200 && capture.statusCode < 400 && capture.statusCode != http.StatusNotModified {
 		entry := &cacheEntry{
 			body:       capture.body.Bytes(),
 			header:     capture.Header().Clone(),

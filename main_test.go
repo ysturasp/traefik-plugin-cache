@@ -243,7 +243,7 @@ func TestCacheKeyVariesByOrigin(t *testing.T) {
 func TestCacheStatusCodes(t *testing.T) {
 	cfg := CreateConfig()
 
-	codes := []int{200, 201, 204, 301, 304}
+	codes := []int{200, 201, 204, 301}
 	for _, code := range codes {
 		handler := newTestHandler(code, "body")
 		middleware := newTestMiddleware(handler, cfg)
@@ -259,6 +259,26 @@ func TestCacheStatusCodes(t *testing.T) {
 		if rec2.Header().Get("X-Cache-Status") != "hit" {
 			t.Errorf("expected hit for status %d, got %s", code, rec2.Header().Get("X-Cache-Status"))
 		}
+	}
+}
+
+func TestCache304NeverCached(t *testing.T) {
+	cfg := CreateConfig()
+	handler := newTestHandler(http.StatusNotModified, "")
+	middleware := newTestMiddleware(handler, cfg)
+
+	req1 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec1 := httptest.NewRecorder()
+	middleware.ServeHTTP(rec1, req1)
+	if rec1.Header().Get("X-Cache-Status") != "miss" {
+		t.Errorf("expected miss for 304, got %s", rec1.Header().Get("X-Cache-Status"))
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec2 := httptest.NewRecorder()
+	middleware.ServeHTTP(rec2, req2)
+	if rec2.Header().Get("X-Cache-Status") != "miss" {
+		t.Errorf("expected a second request to also miss (304 must never be cached), got %s", rec2.Header().Get("X-Cache-Status"))
 	}
 }
 
