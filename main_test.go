@@ -208,6 +208,38 @@ func TestCacheMissHeadersNotDuplicated(t *testing.T) {
 	}
 }
 
+func TestCacheKeyVariesByOrigin(t *testing.T) {
+	cfg := CreateConfig()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+		w.Header().Set("Vary", "Origin")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("hello"))
+	})
+	middleware := newTestMiddleware(handler, cfg)
+
+	reqNoOrigin := httptest.NewRequest(http.MethodGet, "/test", nil)
+	recNoOrigin := httptest.NewRecorder()
+	middleware.ServeHTTP(recNoOrigin, reqNoOrigin)
+	if recNoOrigin.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("expected no ACAO for a same-origin/no-Origin request, got %q", recNoOrigin.Header().Get("Access-Control-Allow-Origin"))
+	}
+
+	reqWithOrigin := httptest.NewRequest(http.MethodGet, "/test", nil)
+	reqWithOrigin.Header.Set("Origin", "https://ysturasp.ru")
+	recWithOrigin := httptest.NewRecorder()
+	middleware.ServeHTTP(recWithOrigin, reqWithOrigin)
+
+	if recWithOrigin.Header().Get("X-Cache-Status") != "miss" {
+		t.Errorf("expected a request with a different Origin to be a separate cache miss, got %s", recWithOrigin.Header().Get("X-Cache-Status"))
+	}
+	if got := recWithOrigin.Header().Get("Access-Control-Allow-Origin"); got != "https://ysturasp.ru" {
+		t.Errorf("expected ACAO to reflect the request's Origin, got %q", got)
+	}
+}
+
 func TestCacheStatusCodes(t *testing.T) {
 	cfg := CreateConfig()
 

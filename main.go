@@ -156,7 +156,7 @@ func (c *Cache) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	key := fmt.Sprintf("%s:%s", req.Method, req.URL.RequestURI())
+	key := fmt.Sprintf("%s:%s:%s", req.Method, req.URL.RequestURI(), req.Header.Get("Origin"))
 	hash := sha256.Sum256([]byte(key))
 	keyHex := fmt.Sprintf("%x", hash)
 
