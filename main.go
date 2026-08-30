@@ -11,18 +11,22 @@ import (
 )
 
 type Config struct {
-	MaxEntries int    `json:"maxEntries,omitempty" yaml:"maxEntries,omitempty"`
-	TTLSeconds int    `json:"ttlSeconds,omitempty" yaml:"ttlSeconds,omitempty"`
-	AddHeader  bool   `json:"addHeader,omitempty" yaml:"addHeader,omitempty"`
-	Debug      bool   `json:"debug,omitempty" yaml:"debug,omitempty"`
+	MaxEntries    int  `json:"maxEntries,omitempty" yaml:"maxEntries,omitempty"`
+	TTLSeconds    int  `json:"ttlSeconds,omitempty" yaml:"ttlSeconds,omitempty"`
+	AddHeader     bool `json:"addHeader,omitempty" yaml:"addHeader,omitempty"`
+	Debug         bool `json:"debug,omitempty" yaml:"debug,omitempty"`
+	MaxEntryBytes int  `json:"maxEntryBytes,omitempty" yaml:"maxEntryBytes,omitempty"`
+	MaxTotalBytes int  `json:"maxTotalBytes,omitempty" yaml:"maxTotalBytes,omitempty"`
 }
 
 func CreateConfig() *Config {
 	return &Config{
-		MaxEntries: 1024,
-		TTLSeconds: 1800,
-		AddHeader:  true,
-		Debug:      false,
+		MaxEntries:    1024,
+		TTLSeconds:    1800,
+		AddHeader:     true,
+		Debug:         false,
+		MaxEntryBytes: 512 * 1024,
+		MaxTotalBytes: 64 * 1024 * 1024,
 	}
 }
 
@@ -34,12 +38,15 @@ type cacheEntry struct {
 }
 
 type cacheMap struct {
-	mu       sync.Mutex
-	entries  map[string]*cacheEntry
-	max      int
-	ttl      time.Duration
-	addHeader bool
-	debug    bool
+	mu            sync.Mutex
+	entries       map[string]*cacheEntry
+	max           int
+	ttl           time.Duration
+	addHeader     bool
+	debug         bool
+	maxEntryBytes int
+	maxTotalBytes int
+	totalBytes    int
 }
 
 func newCacheMap(cfg *Config) *cacheMap {
@@ -51,12 +58,22 @@ func newCacheMap(cfg *Config) *cacheMap {
 	if ttl <= 0 {
 		ttl = 1800 * time.Second
 	}
+	maxEntryBytes := cfg.MaxEntryBytes
+	if maxEntryBytes <= 0 {
+		maxEntryBytes = 512 * 1024
+	}
+	maxTotalBytes := cfg.MaxTotalBytes
+	if maxTotalBytes <= 0 {
+		maxTotalBytes = 64 * 1024 * 1024
+	}
 	return &cacheMap{
-		entries:   make(map[string]*cacheEntry, maxEntries),
-		max:       maxEntries,
-		ttl:       ttl,
-		addHeader: cfg.AddHeader,
-		debug:     cfg.Debug,
+		entries:       make(map[string]*cacheEntry, maxEntries),
+		max:           maxEntries,
+		ttl:           ttl,
+		addHeader:     cfg.AddHeader,
+		debug:         cfg.Debug,
+		maxEntryBytes: maxEntryBytes,
+		maxTotalBytes: maxTotalBytes,
 	}
 }
 
@@ -70,41 +87,60 @@ func (c *cacheMap) get(key string) (*cacheEntry, bool) {
 	}
 
 	if time.Since(entry.createdAt) > c.ttl {
-		delete(c.entries, key)
+		c.deleteLocked(key, entry)
 		return nil, false
 	}
 
 	return entry, true
 }
 
+func (c *cacheMap) deleteLocked(key string, entry *cacheEntry) {
+	delete(c.entries, key)
+	c.totalBytes -= len(entry.body)
+}
+
+func (c *cacheMap) oldestLocked() (string, *cacheEntry, bool) {
+	var oldestKey string
+	var oldestEntry *cacheEntry
+	for k, v := range c.entries {
+		if oldestEntry == nil || v.createdAt.Before(oldestEntry.createdAt) {
+			oldestKey = k
+			oldestEntry = v
+		}
+	}
+	return oldestKey, oldestEntry, oldestEntry != nil
+}
+
 func (c *cacheMap) set(key string, entry *cacheEntry) {
+	size := len(entry.body)
+	if size > c.maxEntryBytes {
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(c.entries) >= c.max {
-		var oldestKey string
-		var oldestTime time.Time
-		first := true
-		for k, v := range c.entries {
-			if first || v.createdAt.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.createdAt
-				first = false
-			}
+	if existing, ok := c.entries[key]; ok {
+		c.deleteLocked(key, existing)
+	}
+
+	for len(c.entries) >= c.max || c.totalBytes+size > c.maxTotalBytes {
+		oldestKey, oldestEntry, ok := c.oldestLocked()
+		if !ok {
+			break
 		}
-		if oldestKey != "" {
-			delete(c.entries, oldestKey)
-		}
+		c.deleteLocked(oldestKey, oldestEntry)
 	}
 
 	c.entries[key] = entry
+	c.totalBytes += size
 }
 
 type responseWriter struct {
 	http.ResponseWriter
-	statusCode int
-	body       *bytes.Buffer
-	header     http.Header
+	statusCode  int
+	body        *bytes.Buffer
+	header      http.Header
 	wroteHeader bool
 }
 
@@ -134,9 +170,9 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 }
 
 type Cache struct {
-	next   http.Handler
-	name   string
-	cache  *cacheMap
+	next  http.Handler
+	name  string
+	cache *cacheMap
 }
 
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {

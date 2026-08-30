@@ -282,6 +282,52 @@ func TestCache304NeverCached(t *testing.T) {
 	}
 }
 
+func TestCacheSkipsEntriesOverMaxEntryBytes(t *testing.T) {
+	cfg := &Config{MaxEntries: 1024, TTLSeconds: 300, AddHeader: true, MaxEntryBytes: 4}
+	handler := newTestHandler(http.StatusOK, "this body is way over the byte cap")
+	middleware := newTestMiddleware(handler, cfg)
+
+	req1 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec1 := httptest.NewRecorder()
+	middleware.ServeHTTP(rec1, req1)
+
+	req2 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec2 := httptest.NewRecorder()
+	middleware.ServeHTTP(rec2, req2)
+
+	if rec2.Header().Get("X-Cache-Status") != "miss" {
+		t.Errorf("expected a response over MaxEntryBytes to never be cached, got %s", rec2.Header().Get("X-Cache-Status"))
+	}
+}
+
+func TestCacheEvictsOldestToStayUnderMaxTotalBytes(t *testing.T) {
+	cfg := &Config{MaxEntries: 1024, TTLSeconds: 300, AddHeader: true, MaxEntryBytes: 1024, MaxTotalBytes: 12}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("body" + r.URL.Path[1:]))
+	})
+	middleware := newTestMiddleware(handler, cfg)
+
+	for _, path := range []string{"/0", "/1", "/2"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		middleware.ServeHTTP(rec, req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/0", nil)
+	rec := httptest.NewRecorder()
+	middleware.ServeHTTP(rec, req)
+	if rec.Header().Get("X-Cache-Status") != "miss" {
+		t.Errorf("expected the oldest entry to be evicted once MaxTotalBytes was exceeded, got %s", rec.Header().Get("X-Cache-Status"))
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/2", nil)
+	rec2 := httptest.NewRecorder()
+	middleware.ServeHTTP(rec2, req2)
+	if rec2.Header().Get("X-Cache-Status") != "hit" {
+		t.Errorf("expected the most recent entry to still be cached, got %s", rec2.Header().Get("X-Cache-Status"))
+	}
+}
+
 func newTestHandler(status int, body string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
