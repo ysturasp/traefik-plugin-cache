@@ -8,26 +8,29 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type Config struct {
-	MaxEntries    int  `json:"maxEntries,omitempty" yaml:"maxEntries,omitempty"`
-	TTLSeconds    int  `json:"ttlSeconds,omitempty" yaml:"ttlSeconds,omitempty"`
-	AddHeader     bool `json:"addHeader,omitempty" yaml:"addHeader,omitempty"`
-	Debug         bool `json:"debug,omitempty" yaml:"debug,omitempty"`
-	MaxEntryBytes int  `json:"maxEntryBytes,omitempty" yaml:"maxEntryBytes,omitempty"`
-	MaxTotalBytes int  `json:"maxTotalBytes,omitempty" yaml:"maxTotalBytes,omitempty"`
+	MaxEntries               int   `json:"maxEntries,omitempty" yaml:"maxEntries,omitempty"`
+	TTLSeconds               int   `json:"ttlSeconds,omitempty" yaml:"ttlSeconds,omitempty"`
+	AddHeader                bool  `json:"addHeader,omitempty" yaml:"addHeader,omitempty"`
+	Debug                    bool  `json:"debug,omitempty" yaml:"debug,omitempty"`
+	MaxEntryBytes            int   `json:"maxEntryBytes,omitempty" yaml:"maxEntryBytes,omitempty"`
+	MaxTotalBytes            int   `json:"maxTotalBytes,omitempty" yaml:"maxTotalBytes,omitempty"`
+	MaxConcurrentBufferBytes int64 `json:"maxConcurrentBufferBytes,omitempty" yaml:"maxConcurrentBufferBytes,omitempty"`
 }
 
 func CreateConfig() *Config {
 	return &Config{
-		MaxEntries:    1024,
-		TTLSeconds:    1800,
-		AddHeader:     true,
-		Debug:         false,
-		MaxEntryBytes: 512 * 1024,
-		MaxTotalBytes: 64 * 1024 * 1024,
+		MaxEntries:               1024,
+		TTLSeconds:               1800,
+		AddHeader:                true,
+		Debug:                    false,
+		MaxEntryBytes:            512 * 1024,
+		MaxTotalBytes:            64 * 1024 * 1024,
+		MaxConcurrentBufferBytes: 32 * 1024 * 1024,
 	}
 }
 
@@ -171,20 +174,43 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 }
 
 type Cache struct {
-	next  http.Handler
-	name  string
-	cache *cacheMap
+	next                     http.Handler
+	name                     string
+	cache                    *cacheMap
+	maxConcurrentBufferBytes int64
+	inFlightBufferBytes      int64
 }
 
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
 	if config == nil {
 		config = CreateConfig()
 	}
+	maxConcurrent := config.MaxConcurrentBufferBytes
+	if maxConcurrent <= 0 {
+		maxConcurrent = 32 * 1024 * 1024
+	}
 	return &Cache{
-		next:  next,
-		name:  name,
-		cache: newCacheMap(config),
+		next:                     next,
+		name:                     name,
+		cache:                    newCacheMap(config),
+		maxConcurrentBufferBytes: maxConcurrent,
 	}, nil
+}
+
+func (c *Cache) tryReserveBuffer(n int64) bool {
+	for {
+		cur := atomic.LoadInt64(&c.inFlightBufferBytes)
+		if cur+n > c.maxConcurrentBufferBytes {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&c.inFlightBufferBytes, cur, cur+n) {
+			return true
+		}
+	}
+}
+
+func (c *Cache) releaseBuffer(n int64) {
+	atomic.AddInt64(&c.inFlightBufferBytes, -n)
 }
 
 func normalizeAcceptEncoding(raw string) string {
@@ -224,6 +250,16 @@ func (c *Cache) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		rw.Write(entry.body)
 		return
 	}
+
+	reserveSize := int64(c.cache.maxEntryBytes)
+	if !c.tryReserveBuffer(reserveSize) {
+		if c.cache.addHeader {
+			rw.Header().Set("X-Cache-Status", "bypass")
+		}
+		c.next.ServeHTTP(rw, req)
+		return
+	}
+	defer c.releaseBuffer(reserveSize)
 
 	capture := newResponseWriter(rw)
 	c.next.ServeHTTP(capture, req)

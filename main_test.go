@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -11,6 +13,11 @@ import (
 func newTestMiddleware(next http.Handler, cfg *Config) http.Handler {
 	h, _ := New(context.Background(), next, cfg, "test")
 	return h
+}
+
+func newTestCache(next http.Handler, cfg *Config) *Cache {
+	h, _ := New(context.Background(), next, cfg, "test")
+	return h.(*Cache)
 }
 
 func TestCacheMiss(t *testing.T) {
@@ -392,6 +399,141 @@ func TestCacheEvictsOldestToStayUnderMaxTotalBytes(t *testing.T) {
 	middleware.ServeHTTP(rec2, req2)
 	if rec2.Header().Get("X-Cache-Status") != "hit" {
 		t.Errorf("expected the most recent entry to still be cached, got %s", rec2.Header().Get("X-Cache-Status"))
+	}
+}
+
+func TestCacheBypassesWhenOverConcurrentBudget(t *testing.T) {
+	cfg := &Config{
+		MaxEntries:               1024,
+		TTLSeconds:               300,
+		AddHeader:                true,
+		MaxEntryBytes:            1024,
+		MaxConcurrentBufferBytes: 1024,
+	}
+	handler := newTestHandler(http.StatusOK, "hello")
+	c := newTestCache(handler, cfg)
+
+	atomic.StoreInt64(&c.inFlightBufferBytes, 1024)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec := httptest.NewRecorder()
+	c.ServeHTTP(rec, req)
+
+	if rec.Header().Get("X-Cache-Status") != "bypass" {
+		t.Errorf("expected bypass when over concurrent budget, got %s", rec.Header().Get("X-Cache-Status"))
+	}
+	if rec.Body.String() != "hello" {
+		t.Errorf("expected the request to still succeed with the real body, got %q", rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rec.Code)
+	}
+}
+
+func TestCacheReleasesConcurrentBudgetAfterRequest(t *testing.T) {
+	cfg := &Config{
+		MaxEntries:               1024,
+		TTLSeconds:               300,
+		AddHeader:                true,
+		MaxEntryBytes:            1024,
+		MaxConcurrentBufferBytes: 4096,
+	}
+	handler := newTestHandler(http.StatusOK, "hello")
+	c := newTestCache(handler, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec := httptest.NewRecorder()
+	c.ServeHTTP(rec, req)
+
+	if got := atomic.LoadInt64(&c.inFlightBufferBytes); got != 0 {
+		t.Errorf("expected in-flight budget released back to 0 after request completes, got %d", got)
+	}
+}
+
+func TestCacheHitDoesNotConsumeConcurrentBudget(t *testing.T) {
+	cfg := &Config{
+		MaxEntries:               1024,
+		TTLSeconds:               300,
+		AddHeader:                true,
+		MaxEntryBytes:            1024,
+		MaxConcurrentBufferBytes: 4096,
+	}
+	handler := newTestHandler(http.StatusOK, "hello")
+	c := newTestCache(handler, cfg)
+
+	req1 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	c.ServeHTTP(httptest.NewRecorder(), req1)
+
+	atomic.StoreInt64(&c.inFlightBufferBytes, 4096)
+
+	req2 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec2 := httptest.NewRecorder()
+	c.ServeHTTP(rec2, req2)
+
+	if rec2.Header().Get("X-Cache-Status") != "hit" {
+		t.Errorf("expected a cache hit to succeed regardless of exhausted concurrency budget, got %s", rec2.Header().Get("X-Cache-Status"))
+	}
+	if rec2.Body.String() != "hello" {
+		t.Errorf("expected cached body, got %q", rec2.Body.String())
+	}
+}
+
+func TestCacheConcurrentBurstNeverExceedsBudget(t *testing.T) {
+	const (
+		concurrency  = 200
+		entryBytes   = 64 * 1024
+		budgetBytes  = 512 * 1024
+		responseSize = 64 * 1024
+	)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(make([]byte, responseSize))
+	})
+
+	cfg := &Config{
+		MaxEntries:               10000,
+		TTLSeconds:               300,
+		AddHeader:                true,
+		MaxEntryBytes:            entryBytes,
+		MaxTotalBytes:            100 * 1024 * 1024,
+		MaxConcurrentBufferBytes: budgetBytes,
+	}
+	c := newTestCache(handler, cfg)
+
+	var wg sync.WaitGroup
+	var maxObserved int64
+	var maxMu sync.Mutex
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/burst-unique-path", nil)
+			rec := httptest.NewRecorder()
+			c.ServeHTTP(rec, req)
+
+			if got := atomic.LoadInt64(&c.inFlightBufferBytes); got > 0 {
+				maxMu.Lock()
+				if got > maxObserved {
+					maxObserved = got
+				}
+				maxMu.Unlock()
+			}
+
+			if rec.Code != http.StatusOK {
+				t.Errorf("request %d: expected 200, got %d", i, rec.Code)
+			}
+			if rec.Body.Len() != responseSize {
+				t.Errorf("request %d: expected full body of %d bytes, got %d", i, responseSize, rec.Body.Len())
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if final := atomic.LoadInt64(&c.inFlightBufferBytes); final != 0 {
+		t.Errorf("expected in-flight budget back to 0 after burst, got %d (leaked reservation)", final)
+	}
+	if maxObserved > budgetBytes {
+		t.Errorf("observed in-flight bytes %d exceeded configured budget %d", maxObserved, budgetBytes)
 	}
 }
 
