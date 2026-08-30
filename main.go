@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -186,13 +187,24 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}, nil
 }
 
+func normalizeAcceptEncoding(raw string) string {
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "br") {
+		return "br"
+	}
+	if strings.Contains(lower, "gzip") {
+		return "gzip"
+	}
+	return "identity"
+}
+
 func (c *Cache) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		c.next.ServeHTTP(rw, req)
 		return
 	}
 
-	key := fmt.Sprintf("%s:%s:%s", req.Method, req.URL.RequestURI(), req.Header.Get("Origin"))
+	key := fmt.Sprintf("%s:%s:%s:%s", req.Method, req.URL.RequestURI(), req.Header.Get("Origin"), normalizeAcceptEncoding(req.Header.Get("Accept-Encoding")))
 	hash := sha256.Sum256([]byte(key))
 	keyHex := fmt.Sprintf("%x", hash)
 

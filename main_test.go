@@ -240,6 +240,73 @@ func TestCacheKeyVariesByOrigin(t *testing.T) {
 	}
 }
 
+func TestCacheKeyVariesByAcceptEncoding(t *testing.T) {
+	cfg := CreateConfig()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch normalizeAcceptEncoding(r.Header.Get("Accept-Encoding")) {
+		case "br":
+			w.Header().Set("Content-Encoding", "br")
+			w.Write([]byte("brotli-body"))
+		case "gzip":
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Write([]byte("gzip-body"))
+		default:
+			w.Write([]byte("identity-body"))
+		}
+	})
+	middleware := newTestMiddleware(handler, cfg)
+
+	reqBr := httptest.NewRequest(http.MethodGet, "/test", nil)
+	reqBr.Header.Set("Accept-Encoding", "br")
+	recBr := httptest.NewRecorder()
+	middleware.ServeHTTP(recBr, reqBr)
+	if recBr.Header().Get("X-Cache-Status") != "miss" {
+		t.Fatalf("expected first br request to miss, got %s", recBr.Header().Get("X-Cache-Status"))
+	}
+
+	reqNone := httptest.NewRequest(http.MethodGet, "/test", nil)
+	recNone := httptest.NewRecorder()
+	middleware.ServeHTTP(recNone, reqNone)
+	if recNone.Header().Get("X-Cache-Status") != "miss" {
+		t.Errorf("expected a request with no Accept-Encoding to be a separate cache miss, not replay the cached br body, got %s", recNone.Header().Get("X-Cache-Status"))
+	}
+	if recNone.Body.String() != "identity-body" {
+		t.Errorf("expected identity body for a request with no Accept-Encoding, got %q", recNone.Body.String())
+	}
+	if recNone.Header().Get("Content-Encoding") == "br" {
+		t.Errorf("client with no Accept-Encoding got a brotli-encoded response it can't decode")
+	}
+
+	reqBrAgain := httptest.NewRequest(http.MethodGet, "/test", nil)
+	reqBrAgain.Header.Set("Accept-Encoding", "br")
+	recBrAgain := httptest.NewRecorder()
+	middleware.ServeHTTP(recBrAgain, reqBrAgain)
+	if recBrAgain.Header().Get("X-Cache-Status") != "hit" {
+		t.Errorf("expected a second br request to hit the first br entry, got %s", recBrAgain.Header().Get("X-Cache-Status"))
+	}
+	if recBrAgain.Body.String() != "brotli-body" {
+		t.Errorf("expected brotli body on br cache hit, got %q", recBrAgain.Body.String())
+	}
+}
+
+func TestNormalizeAcceptEncoding(t *testing.T) {
+	cases := map[string]string{
+		"":                              "identity",
+		"identity":                      "identity",
+		"gzip":                          "gzip",
+		"gzip, deflate":                 "gzip",
+		"br":                            "br",
+		"br;q=1.0, gzip;q=0.8, *;q=0.1": "br",
+		"deflate, br":                   "br",
+		"DEFLATE, GZIP":                 "gzip",
+	}
+	for input, want := range cases {
+		if got := normalizeAcceptEncoding(input); got != want {
+			t.Errorf("normalizeAcceptEncoding(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestCacheStatusCodes(t *testing.T) {
 	cfg := CreateConfig()
 
